@@ -7,8 +7,6 @@ from datetime import datetime
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from pyvirtualdisplay import Display
 
 # Start headless virtual display for Streamlit Cloud
@@ -35,7 +33,7 @@ selected_room = st.sidebar.radio(
     index=0
 )
 
-scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.5, 3.0, 1.0)
+scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.1, 1.5, 0.2)
 
 # Session State Storage Initialization
 if "records" not in st.session_state:
@@ -105,99 +103,80 @@ if start_btn:
 
             driver = setup_browser()
             driver.get("https://odibets.com/casino/aviator")
-            time.sleep(6)  # Wait for full page and iframe loading
+            time.sleep(5)
 
-            # Explicitly select Room Tab on OdiBets interface
+            # Switch Room tab on main container
             try:
                 target_label = "Room 1" if selected_room == "Room 1" else "Room 2"
                 tab_elements = driver.find_elements(By.XPATH, f"//*[contains(text(), '{target_label}')]")
                 for tab in tab_elements:
                     if tab.is_displayed():
                         driver.execute_script("arguments[0].click();", tab)
-                        time.sleep(4)
+                        time.sleep(3)
                         break
             except Exception:
                 pass
 
-            status_box.success(f"Connected to {selected_room}! Tracking live data...")
+            # Switch into game frame ONCE to maximize speed
+            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            if len(iframes) > 0:
+                driver.switch_to.frame(iframes[0])
 
-            # Long-running polling loop
+            status_box.success(f"Connected to {selected_room}! Real-time tracking active...")
+
+            # Ultra-fast real-time loop
             while True:
-                # 1. Switch driver context to game iframe
-                driver.switch_to.default_content()
-                iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                
-                game_frame = None
-                for frame in iframes:
-                    src = frame.get_attribute("src") or ""
-                    if "spribegaming" in src or "aviator" in src:
-                        game_frame = frame
-                        break
+                try:
+                    # Target latest multiplier bubble directly (index 0)
+                    latest_bubble = driver.find_elements(
+                        By.CSS_SELECTOR, 
+                        ".payouts-block .bubble-multiplier, .payout-tag, .payouts-wrapper div"
+                    )
 
-                if game_frame:
-                    driver.switch_to.frame(game_frame)
-                elif len(iframes) > 0:
-                    driver.switch_to.frame(iframes[0])
-
-                # 2. Target exact Aviator live payout bubbles inside Spribe container
-                elements = driver.find_elements(
-                    By.CSS_SELECTOR, 
-                    ".payouts-block .bubble-multiplier, .payout-tag, .payouts-wrapper div"
-                )
-
-                current_batch = []
-                for el in elements:
-                    try:
-                        text = el.text.strip()
+                    if latest_bubble:
+                        text = latest_bubble[0].text.strip()
                         if "x" in text.lower():
                             clean = text.lower().replace("x", "").replace(" ", "").strip()
                             val = float(clean)
-                            current_batch.append(val)
-                    except Exception:
-                        continue
 
-                driver.switch_to.default_content()
+                            # Check if value is new
+                            if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
+                                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                
+                                entry = {
+                                    "Timestamp": ts,
+                                    "Multiplier": f"{val:.2f}",
+                                    "Raw_Val": val
+                                }
+                                
+                                st.session_state.records.insert(0, entry)
 
-                # 3. Append new distinct records chronologically
-                for val in reversed(current_batch):
-                    if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
-                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        
-                        entry = {
-                            "Timestamp": ts,
-                            "Multiplier": f"{val:.2f}",
-                            "Raw_Val": val
-                        }
-                        
-                        st.session_state.records.insert(0, entry)
+                                # Append to CSV log file
+                                with open("aviator_records.csv", "a", newline="") as f:
+                                    writer = csv.writer(f)
+                                    writer.writerow([ts, selected_room, val])
 
-                        # Save to persistent CSV log
-                        with open("aviator_records.csv", "a", newline="") as f:
-                            writer = csv.writer(f)
-                            writer.writerow([ts, selected_room, val])
+                                # Update UI immediately on new detection
+                                if val < 2.0:
+                                    badge_color = "#3498db"
+                                elif 2.0 <= val < 10.0:
+                                    badge_color = "#9b59b6"
+                                else:
+                                    badge_color = "#e91e63"
 
-                # 4. Render output table & latest metric
-                if st.session_state.records:
-                    latest_val = st.session_state.records[0]["Raw_Val"]
-                    
-                    if latest_val < 2.0:
-                        badge_color = "#3498db"
-                    elif 2.0 <= latest_val < 10.0:
-                        badge_color = "#9b59b6"
-                    else:
-                        badge_color = "#e91e63"
+                                metric_box.markdown(
+                                    f"### Latest Value: <span style='color: {badge_color}; font-weight: bold;'>{val:.2f}</span>",
+                                    unsafe_allow_html=True
+                                )
+                                
+                                df = pd.DataFrame(st.session_state.records)[["Timestamp", "Multiplier"]]
+                                styled_df = df.style.map(color_multiplier_text, subset=["Multiplier"])
+                                
+                                table_box.dataframe(styled_df, use_container_width=True)
 
-                    metric_box.markdown(
-                        f"### Latest Value: <span style='color: {badge_color}; font-weight: bold;'>{latest_val:.2f}</span>",
-                        unsafe_allow_html=True
-                    )
-                    
-                    df = pd.DataFrame(st.session_state.records)[["Timestamp", "Multiplier"]]
-                    styled_df = df.style.map(color_multiplier_text, subset=["Multiplier"])
-                    
-                    table_box.dataframe(styled_df, use_container_width=True)
+                except Exception:
+                    pass
 
-                # Keep loop sleep strictly above 0.5s to prevent CPU throttling notifications
                 time.sleep(scan_interval)
 
         except Exception as e:
