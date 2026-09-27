@@ -1,1 +1,6 @@
-
+chromium-chromedriver
+chromium
+tesseract-ocr
+tesseract-ocr-eng
+libgl1-mesa-glx
+xvfb
