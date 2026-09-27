@@ -26,7 +26,7 @@ st.set_page_config(
 
 st.title("✈️ OdiBets Aviator Live Tracker")
 
-# Cleanup any temporary screenshot/image artifacts to free RAM/disk space
+# Disk cleanup function for leftover temp files
 def cleanup_temp_files():
     try:
         temp_files = glob.glob("/tmp/*.png") + glob.glob("*.png")
@@ -38,7 +38,6 @@ def cleanup_temp_files():
     except Exception:
         pass
 
-# Run initial disk/memory cleanup
 cleanup_temp_files()
 
 # Sidebar Configuration
@@ -52,9 +51,22 @@ selected_room = st.sidebar.radio(
 
 scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.3, 2.0, 0.5)
 
-# Session State Storage Initialization (Capped to prevent RAM overflow)
+# Initialize Session State
 if "records" not in st.session_state:
     st.session_state.records = []
+    # Load past CSV data on fresh session launch if available
+    if os.path.exists("aviator_records.csv"):
+        try:
+            records_df = pd.read_csv("aviator_records.csv", names=["Timestamp", "Room", "Raw_Val"])
+            records_df = records_df[records_df["Room"] == selected_room].tail(50)
+            for _, row in records_df.iloc[::-1].iterrows():
+                st.session_state.records.append({
+                    "Timestamp": row["Timestamp"],
+                    "Multiplier": f"{float(row['Raw_Val']):.2f}x",
+                    "Raw_Val": float(row["Raw_Val"])
+                })
+        except Exception:
+            pass
 
 # Sidebar Action Buttons
 start_btn = st.sidebar.button("🚀 Start Monitoring")
@@ -65,31 +77,44 @@ if reset_btn:
     if os.path.exists("aviator_records.csv"):
         open("aviator_records.csv", "w").close()
     cleanup_temp_files()
-    st.sidebar.success("Data cleared and memory freed!")
+    st.sidebar.success("Recorded data cleared!")
 
 col_left, col_right = st.columns([1, 1])
 
 with col_left:
     st.subheader("Connection Status")
     status_box = st.empty()
+    status_box.info("Ready. Click 'Start Monitoring' to connect.")
 
 with col_right:
     st.subheader(f"Live Multipliers ({selected_room})")
     metric_box = st.empty()
     table_box = st.empty()
 
-def color_multiplier_text(val):
-    """Applies color formatting strictly to text numbers."""
-    try:
-        num = float(val)
-        if num < 2.0:
-            return 'color: #3498db; font-weight: bold;'  # Blue
-        elif 2.0 <= num < 10.0:
-            return 'color: #9b59b6; font-weight: bold;'  # Purple
+# Render existing data immediately so table is never blank
+def render_dashboard():
+    if st.session_state.records:
+        latest_val = st.session_state.records[0]["Raw_Val"]
+        
+        if latest_val < 2.0:
+            badge_color = "#3498db"
+        elif 2.0 <= latest_val < 10.0:
+            badge_color = "#9b59b6"
         else:
-            return 'color: #e91e63; font-weight: bold;'  # Pink
-    except ValueError:
-        return ''
+            badge_color = "#e91e63"
+
+        metric_box.markdown(
+            f"### Latest Value: <span style='color: {badge_color}; font-weight: bold;'>{latest_val:.2f}x</span>",
+            unsafe_allow_html=True
+        )
+
+        df = pd.DataFrame(st.session_state.records)[["Timestamp", "Multiplier"]]
+        table_box.dataframe(df, use_container_width=True, height=400)
+    else:
+        metric_box.markdown("### Latest Value: `--`")
+        table_box.info("No multipliers recorded yet.")
+
+render_dashboard()
 
 def setup_browser():
     options = webdriver.ChromeOptions()
@@ -130,7 +155,7 @@ if start_btn:
             driver.get("https://odibets.com/casino/aviator")
             time.sleep(5)
 
-            # Explicitly trigger Room Tab on OdiBets UI
+            # Switch Room tab on main site wrapper
             try:
                 target_label = "Room 1" if selected_room == "Room 1" else "Room 2"
                 tab_elements = driver.find_elements(By.XPATH, f"//*[contains(text(), '{target_label}')]")
@@ -142,19 +167,18 @@ if start_btn:
             except Exception:
                 pass
 
-            # Focus into main game frame once
+            # Switch into game frame
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             if len(iframes) > 0:
                 driver.switch_to.frame(iframes[0])
 
             status_box.success(f"Connected to {selected_room}! Tracking active...")
 
-            # Real-time Extraction Loop
             loop_counter = 0
             while True:
                 loop_counter += 1
                 try:
-                    # Extract latest multiplier bubble
+                    # Extract latest multiplier bubble (index 0)
                     latest_bubble = driver.find_elements(
                         By.CSS_SELECTOR, 
                         ".payouts-block .bubble-multiplier, .payout-tag, .payouts-wrapper div"
@@ -166,48 +190,32 @@ if start_btn:
                             clean = text.lower().replace("x", "").replace(" ", "").strip()
                             val = float(clean)
 
-                            # Record only new incoming values
+                            # Record only distinct new incoming values
                             if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
                                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 
                                 entry = {
                                     "Timestamp": ts,
-                                    "Multiplier": f"{val:.2f}",
+                                    "Multiplier": f"{val:.2f}x",
                                     "Raw_Val": val
                                 }
                                 
                                 st.session_state.records.insert(0, entry)
 
-                                # Cap in-memory history to last 50 items to keep RAM low
                                 if len(st.session_state.records) > 50:
                                     st.session_state.records = st.session_state.records[:50]
 
-                                # Save full long-term data to CSV file on disk
                                 with open("aviator_records.csv", "a", newline="") as f:
                                     writer = csv.writer(f)
                                     writer.writerow([ts, selected_room, val])
 
-                                # Update display metrics
-                                if val < 2.0:
-                                    badge_color = "#3498db"
-                                elif 2.0 <= val < 10.0:
-                                    badge_color = "#9b59b6"
-                                else:
-                                    badge_color = "#e91e63"
-
-                                metric_box.markdown(
-                                    f"### Latest Value: <span style='color: {badge_color}; font-weight: bold;'>{val:.2f}</span>",
-                                    unsafe_allow_html=True
-                                )
-                                
-                                df = pd.DataFrame(st.session_state.records)[["Timestamp", "Multiplier"]]
-                                styled_df = df.style.map(color_multiplier_text, subset=["Multiplier"])
-                                table_box.dataframe(styled_df, use_container_width=True)
+                                # Immediately re-render UI components on new arrival
+                                render_dashboard()
 
                 except Exception:
                     pass
 
-                # Perform memory garbage collection every 20 checks
+                # Clear CPU/RAM cache periodically
                 if loop_counter % 20 == 0:
                     gc.collect()
                     cleanup_temp_files()
@@ -215,5 +223,5 @@ if start_btn:
                 time.sleep(scan_interval)
 
         except Exception as e:
-            status_box.warning(f"Re-synchronizing stream... ({str(e)[:40]})")
+            status_box.warning(f"Re-synchronizing room stream... ({str(e)[:40]})")
             time.sleep(2)
