@@ -4,12 +4,9 @@ import csv
 import pandas as pd
 import streamlit as st
 from datetime import datetime
-from bs4 import BeautifulSoup
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from pyvirtualdisplay import Display
 
 # Start headless virtual display for Streamlit Cloud
@@ -36,9 +33,9 @@ selected_room = st.sidebar.radio(
     index=0
 )
 
-scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.3, 2.0, 0.5)
+scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.5, 3.0, 1.0)
 
-# Target URLs
+# Target URLs based on selected room
 if selected_room == "Room 1":
     target_url = "https://odibets.com/casino/aviator?room=aviator"
 else:
@@ -46,9 +43,20 @@ else:
 
 st.sidebar.info(f"Targeting: **{selected_room}**\nURL: `{target_url}`")
 
-# Session State Storage
+# Session State Storage Initialization
 if "records" not in st.session_state:
     st.session_state.records = []
+
+# Action Buttons in Sidebar
+start_btn = st.sidebar.button("🚀 Start Monitoring")
+reset_btn = st.sidebar.button("🗑️ Reset Recorded Data")
+
+if reset_btn:
+    st.session_state.records = []
+    # Clear CSV log content
+    if os.path.exists("aviator_records.csv"):
+        open("aviator_records.csv", "w").close()
+    st.sidebar.success("Data reset successfully!")
 
 col_left, col_right = st.columns([1, 1])
 
@@ -61,10 +69,8 @@ with col_right:
     metric_box = st.empty()
     table_box = st.empty()
 
-start_btn = st.sidebar.button("🚀 Start Monitoring")
-
 def color_multiplier_text(val):
-    """Applies color to numerical text directly."""
+    """Applies color formatting strictly to text numbers."""
     try:
         num = float(val)
         if num < 2.0:
@@ -92,15 +98,11 @@ def setup_browser():
     return webdriver.Chrome(options=options)
 
 if start_btn:
-    st.session_state.records = []
     driver = None
-    attempt = 0
 
-    # Continuous long-running loop
     while True:
         try:
-            attempt += 1
-            status_box.info(f"Connecting to {selected_room} (Session #{attempt})...")
+            status_box.info(f"Connecting to {selected_room}...")
             
             if driver:
                 try:
@@ -110,14 +112,13 @@ if start_btn:
 
             driver = setup_browser()
             driver.get(target_url)
-            time.sleep(5)  # Initial DOM load
+            time.sleep(5)  # Allow frame initialization
 
-            # Target precise room inside iframe structure
+            # Switch room tab if present in main container
             if selected_room == "Room 2":
                 try:
-                    # Switch & click Room 2 tab directly on the page container
-                    room2_tabs = driver.find_elements(By.XPATH, "//*[contains(text(), 'Room 2')]")
-                    for tab in room2_tabs:
+                    room_tabs = driver.find_elements(By.XPATH, "//*[contains(text(), 'Room 2')]")
+                    for tab in room_tabs:
                         if tab.is_displayed():
                             tab.click()
                             time.sleep(2)
@@ -125,37 +126,35 @@ if start_btn:
                 except Exception:
                     pass
 
-            status_box.success(f"Active Live Tracker: {selected_room}")
+            status_box.success(f"Connected to {selected_room}! Tracking live data...")
 
-            # Sub-loop for real-time high-speed DOM polling
+            # Real-time monitoring loop
             while True:
-                # 1. Access active game iframe
+                # 1. Switch to active iframe
                 iframes = driver.find_elements(By.TAG_NAME, "iframe")
                 if len(iframes) > 0:
                     driver.switch_to.frame(iframes[0])
 
-                # 2. Extract DOM Page Source
-                html_source = driver.page_source
-                soup = BeautifulSoup(html_source, "html.parser")
+                # 2. Direct DOM extraction (No heavy BeautifulSoup overhead)
+                payout_elements = driver.find_elements(
+                    By.XPATH, 
+                    "//*[contains(@class, 'payout') or contains(@class, 'bubble')]"
+                )
 
-                # 3. Target payout history bubbles
-                payout_elements = soup.find_all(class_=lambda c: c and ("payout" in c.lower() or "bubble" in c.lower()))
+                current_batch = []
+                for el in payout_elements:
+                    try:
+                        text = el.text.strip()
+                        if "x" in text.lower():
+                            clean = text.lower().replace("x", "").replace(" ", "").strip()
+                            val = float(clean)
+                            current_batch.append(val)
+                    except Exception:
+                        continue
 
                 driver.switch_to.default_content()
 
-                # 4. Extract numerical values (cleaned without 'x')
-                current_batch = []
-                for el in payout_elements:
-                    text = el.get_text().strip()
-                    if "x" in text.lower():
-                        clean = text.lower().replace("x", "").replace(" ", "").strip()
-                        try:
-                            val = float(clean)
-                            current_batch.append(val)
-                        except ValueError:
-                            continue
-
-                # 5. Insert new records chronologically
+                # 3. Store new chronological entries
                 for val in reversed(current_batch):
                     if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -168,12 +167,12 @@ if start_btn:
                         
                         st.session_state.records.insert(0, entry)
 
-                        # Save to CSV
+                        # Write to CSV log file
                         with open("aviator_records.csv", "a", newline="") as f:
                             writer = csv.writer(f)
                             writer.writerow([ts, selected_room, val])
 
-                # 6. Render Dashboard Table & Badge
+                # 4. Render Table and Metric Header
                 if st.session_state.records:
                     latest_val = st.session_state.records[0]["Raw_Val"]
                     
@@ -194,8 +193,9 @@ if start_btn:
                     
                     table_box.dataframe(styled_df, use_container_width=True)
 
+                # Pause to keep CPU low and avoid Streamlit cloud throttling
                 time.sleep(scan_interval)
 
         except Exception as e:
-            status_box.warning(f"Re-synchronizing session... ({str(e)[:50]})")
+            status_box.warning(f"Re-establishing connection... ({str(e)[:40]})")
             time.sleep(2)
