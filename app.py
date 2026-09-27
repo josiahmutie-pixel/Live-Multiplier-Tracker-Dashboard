@@ -1,6 +1,8 @@
 import os
+import gc
 import time
 import csv
+import glob
 import pandas as pd
 import streamlit as st
 from datetime import datetime
@@ -24,6 +26,21 @@ st.set_page_config(
 
 st.title("✈️ OdiBets Aviator Live Tracker")
 
+# Cleanup any temporary screenshot/image artifacts to free RAM/disk space
+def cleanup_temp_files():
+    try:
+        temp_files = glob.glob("/tmp/*.png") + glob.glob("*.png")
+        for f in temp_files:
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+# Run initial disk/memory cleanup
+cleanup_temp_files()
+
 # Sidebar Configuration
 st.sidebar.header("Room & Scan Settings")
 
@@ -33,9 +50,9 @@ selected_room = st.sidebar.radio(
     index=0
 )
 
-scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.1, 1.5, 0.2)
+scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.3, 2.0, 0.5)
 
-# Session State Storage Initialization
+# Session State Storage Initialization (Capped to prevent RAM overflow)
 if "records" not in st.session_state:
     st.session_state.records = []
 
@@ -47,7 +64,8 @@ if reset_btn:
     st.session_state.records = []
     if os.path.exists("aviator_records.csv"):
         open("aviator_records.csv", "w").close()
-    st.sidebar.success("Recorded data cleared!")
+    cleanup_temp_files()
+    st.sidebar.success("Data cleared and memory freed!")
 
 col_left, col_right = st.columns([1, 1])
 
@@ -79,7 +97,11 @@ def setup_browser():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--disk-cache-size=1")
+    options.add_argument("--media-cache-size=1")
+    options.add_argument("--window-size=1280,720")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     chrome_path = "/usr/bin/chromium"
@@ -101,11 +123,14 @@ if start_btn:
                 except Exception:
                     pass
 
+            cleanup_temp_files()
+            gc.collect()
+
             driver = setup_browser()
             driver.get("https://odibets.com/casino/aviator")
             time.sleep(5)
 
-            # Switch Room tab on main container
+            # Explicitly trigger Room Tab on OdiBets UI
             try:
                 target_label = "Room 1" if selected_room == "Room 1" else "Room 2"
                 tab_elements = driver.find_elements(By.XPATH, f"//*[contains(text(), '{target_label}')]")
@@ -117,17 +142,19 @@ if start_btn:
             except Exception:
                 pass
 
-            # Switch into game frame ONCE to maximize speed
+            # Focus into main game frame once
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             if len(iframes) > 0:
                 driver.switch_to.frame(iframes[0])
 
-            status_box.success(f"Connected to {selected_room}! Real-time tracking active...")
+            status_box.success(f"Connected to {selected_room}! Tracking active...")
 
-            # Ultra-fast real-time loop
+            # Real-time Extraction Loop
+            loop_counter = 0
             while True:
+                loop_counter += 1
                 try:
-                    # Target latest multiplier bubble directly (index 0)
+                    # Extract latest multiplier bubble
                     latest_bubble = driver.find_elements(
                         By.CSS_SELECTOR, 
                         ".payouts-block .bubble-multiplier, .payout-tag, .payouts-wrapper div"
@@ -139,7 +166,7 @@ if start_btn:
                             clean = text.lower().replace("x", "").replace(" ", "").strip()
                             val = float(clean)
 
-                            # Check if value is new
+                            # Record only new incoming values
                             if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
                                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 
@@ -151,12 +178,16 @@ if start_btn:
                                 
                                 st.session_state.records.insert(0, entry)
 
-                                # Append to CSV log file
+                                # Cap in-memory history to last 50 items to keep RAM low
+                                if len(st.session_state.records) > 50:
+                                    st.session_state.records = st.session_state.records[:50]
+
+                                # Save full long-term data to CSV file on disk
                                 with open("aviator_records.csv", "a", newline="") as f:
                                     writer = csv.writer(f)
                                     writer.writerow([ts, selected_room, val])
 
-                                # Update UI immediately on new detection
+                                # Update display metrics
                                 if val < 2.0:
                                     badge_color = "#3498db"
                                 elif 2.0 <= val < 10.0:
@@ -171,14 +202,18 @@ if start_btn:
                                 
                                 df = pd.DataFrame(st.session_state.records)[["Timestamp", "Multiplier"]]
                                 styled_df = df.style.map(color_multiplier_text, subset=["Multiplier"])
-                                
                                 table_box.dataframe(styled_df, use_container_width=True)
 
                 except Exception:
                     pass
 
+                # Perform memory garbage collection every 20 checks
+                if loop_counter % 20 == 0:
+                    gc.collect()
+                    cleanup_temp_files()
+
                 time.sleep(scan_interval)
 
         except Exception as e:
-            status_box.warning(f"Re-synchronizing room stream... ({str(e)[:40]})")
+            status_box.warning(f"Re-synchronizing stream... ({str(e)[:40]})")
             time.sleep(2)
