@@ -23,13 +23,54 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("✈️ OdiBets Aviator Live Tracker")
-st.caption("Automated live DOM multiplier tracker built for Streamlit Cloud.")
+# Custom CSS for Color Badges
+st.markdown("""
+<style>
+.badge-blue {
+    background-color: #3498db;
+    color: white;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-weight: bold;
+}
+.badge-purple {
+    background-color: #9b59b6;
+    color: white;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-weight: bold;
+}
+.badge-pink {
+    background-color: #e91e63;
+    color: white;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-weight: bold;
+}
+</style>
+""", unsafe_allow_html=True)
 
-# Sidebar Controls
-st.sidebar.header("Configuration")
-target_url = st.sidebar.text_input("Target URL", "https://odibets.com/casino/aviator")
-scan_interval = st.sidebar.slider("Check Interval (seconds)", 1.0, 5.0, 2.0)
+st.title("✈️ OdiBets Aviator Live Tracker")
+st.caption("Auto-reconnecting live DOM tracker with color-coded multiplier categories.")
+
+# Sidebar Configuration
+st.sidebar.header("Room & Scan Settings")
+
+selected_room = st.sidebar.radio(
+    "Choose Aviator Room:",
+    options=["Room 1", "Room 2"],
+    index=0
+)
+
+scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.5, 3.0, 1.0)
+
+# Build Target URL dynamically based on room selection
+if selected_room == "Room 1":
+    target_url = "https://odibets.com/casino/aviator?room=aviator"
+else:
+    target_url = "https://odibets.com/casino/aviator?room=aviator2"
+
+st.sidebar.info(f"Targeting: **{selected_room}**\nURL: `{target_url}`")
 
 # Session State Storage
 if "records" not in st.session_state:
@@ -42,11 +83,24 @@ with col_left:
     status_box = st.empty()
 
 with col_right:
-    st.subheader("Live Multipliers Log")
+    st.subheader(f"Live Multipliers ({selected_room})")
     metric_box = st.empty()
     table_box = st.empty()
 
 start_btn = st.sidebar.button("🚀 Start Monitoring")
+
+def get_category_and_color(val):
+    if val < 2.0:
+        return "Blue (< 2.0x)", "#3498db"
+    elif 2.0 <= val < 10.0:
+        return "Purple (2x - 10x)", "#9b59b6"
+    else:
+        return "Pink (>= 10x)", "#e91e63"
+
+def highlight_rows(row):
+    val = row["Raw_Val"]
+    _, color = get_category_and_color(val)
+    return [f'background-color: {color}; color: white; font-weight: bold;' if col in ["Multiplier", "Category"] else '' for col in row.index]
 
 def setup_browser():
     options = webdriver.ChromeOptions()
@@ -57,7 +111,6 @@ def setup_browser():
     options.add_argument("--window-size=1920,1080")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-    # Chromium binary path on Linux
     chrome_path = "/usr/bin/chromium"
     if os.path.exists(chrome_path):
         options.binary_location = chrome_path
@@ -65,66 +118,113 @@ def setup_browser():
     return webdriver.Chrome(options=options)
 
 if start_btn:
-    status_box.info("Initializing cloud browser driver...")
+    st.session_state.records = []
     driver = None
+    
+    max_retries = 5
+    retry_count = 0
 
-    try:
-        driver = setup_browser()
-        status_box.info(f"Connecting to {target_url}...")
-        driver.get(target_url)
-        time.sleep(8)  # Wait for dynamic iframe scripts to load
+    while retry_count < max_retries:
+        try:
+            status_box.info(f"Launching browser for {selected_room} (Attempt {retry_count + 1})...")
+            
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
-        status_box.success("Connected! Scraper running successfully...")
-        last_multiplier = None
+            driver = setup_browser()
+            status_box.info(f"Connecting to {target_url}...")
+            driver.get(target_url)
+            time.sleep(7)  # Wait for iframe load
 
-        while True:
-            # 1. Switch to Aviator game iframe if present
-            iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            if len(iframes) > 0:
-                driver.switch_to.frame(iframes[0])
+            # Explicitly click room tab if present in main DOM
+            try:
+                room_btn = driver.find_element(By.XPATH, f"//*[contains(text(), '{selected_room}')]")
+                room_btn.click()
+                time.sleep(2)
+            except Exception:
+                pass
 
-            # 2. Extract DOM Page Source
-            html_source = driver.page_source
-            soup = BeautifulSoup(html_source, "html.parser")
+            status_box.success(f"Connected to {selected_room}! Live tracking active...")
+            
+            # Reset retry count on successful connection
+            retry_count = 0
 
-            # 3. Search for payout/round history elements in DOM
-            payout_elements = soup.find_all(class_=lambda c: c and ("payout" in c.lower() or "bubble" in c.lower() or "history" in c.lower()))
+            # Main Parsing Loop
+            while True:
+                # 1. Switch to Aviator game iframe if present
+                iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                if len(iframes) > 0:
+                    driver.switch_to.frame(iframes[0])
 
-            extracted_val = None
-            for el in payout_elements:
-                text = el.get_text().strip()
-                if "x" in text.lower():
-                    clean = text.lower().replace("x", "").replace(" ", "").strip()
-                    try:
-                        extracted_val = float(clean)
-                        break
-                    except ValueError:
-                        continue
+                # 2. Extract DOM Page Source
+                html_source = driver.page_source
+                soup = BeautifulSoup(html_source, "html.parser")
 
-            # Revert back to main page context
-            driver.switch_to.default_content()
+                # 3. Find history bubble elements
+                payout_elements = soup.find_all(class_=lambda c: c and ("payout" in c.lower() or "bubble" in c.lower()))
 
-            # 4. Log extracted multipliers
-            if extracted_val and extracted_val != last_multiplier:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                st.session_state.records.insert(0, {"Timestamp": ts, "Multiplier": f"{extracted_val}x"})
+                driver.switch_to.default_content()
 
-                # Save to CSV
-                with open("aviator_records.csv", "a", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([ts, extracted_val])
+                # 4. Extract numerical values
+                current_batch = []
+                for el in payout_elements:
+                    text = el.get_text().strip()
+                    if "x" in text.lower():
+                        clean = text.lower().replace("x", "").replace(" ", "").strip()
+                        try:
+                            val = float(clean)
+                            current_batch.append(val)
+                        except ValueError:
+                            continue
 
-                last_multiplier = extracted_val
+                # 5. Reverse batch to maintain chronological order
+                for val in reversed(current_batch):
+                    if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        category, _ = get_category_and_color(val)
+                        
+                        entry = {
+                            "Timestamp": ts,
+                            "Multiplier": f"{val}x",
+                            "Category": category,
+                            "Room": selected_room,
+                            "Raw_Val": val
+                        }
+                        
+                        st.session_state.records.insert(0, entry)
 
-            # 5. Update UI
-            if st.session_state.records:
-                metric_box.metric("Latest Captured Value", st.session_state.records[0]["Multiplier"])
-                table_box.dataframe(pd.DataFrame(st.session_state.records), use_container_width=True)
+                        # Write log entry to CSV
+                        with open("aviator_grouped_records.csv", "a", newline="") as f:
+                            writer = csv.writer(f)
+                            writer.writerow([ts, selected_room, val, category])
 
-            time.sleep(scan_interval)
+                # 6. Render Updates
+                if st.session_state.records:
+                    latest = st.session_state.records[0]
+                    val_num = latest["Raw_Val"]
+                    badge_cls = "badge-blue" if val_num < 2.0 else ("badge-purple" if val_num < 10.0 else "badge-pink")
+                    
+                    metric_box.markdown(
+                        f"### Latest Value: <span class='{badge_cls}'>{latest['Multiplier']} ({latest['Category']})</span>",
+                        unsafe_allow_html=True
+                    )
+                    
+                    df = pd.DataFrame(st.session_state.records)[["Timestamp", "Room", "Multiplier", "Category", "Raw_Val"]]
+                    styled_df = df.style.apply(highlight_rows, axis=1).drop(columns=["Raw_Val"])
+                    
+                    table_box.dataframe(styled_df, use_container_width=True)
 
-    except Exception as e:
-        status_box.error(f"Execution Error: {str(e)}")
-    finally:
+                time.sleep(scan_interval)
+
+        except Exception as e:
+            retry_count += 1
+            status_box.warning(f"Connection glitch encountered: {str(e)}. Reconnecting ({retry_count}/{max_retries})...")
+            time.sleep(4)
+
+    if retry_count >= max_retries:
+        status_box.error("Max reconnect attempts reached. Please click 'Start Monitoring' to restart.")
         if driver:
             driver.quit()
