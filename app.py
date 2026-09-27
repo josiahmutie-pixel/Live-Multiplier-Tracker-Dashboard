@@ -7,6 +7,8 @@ from datetime import datetime
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from pyvirtualdisplay import Display
 
 # Start headless virtual display for Streamlit Cloud
@@ -35,28 +37,19 @@ selected_room = st.sidebar.radio(
 
 scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.5, 3.0, 1.0)
 
-# Target URLs based on selected room
-if selected_room == "Room 1":
-    target_url = "https://odibets.com/casino/aviator?room=aviator"
-else:
-    target_url = "https://odibets.com/casino/aviator?room=aviator2"
-
-st.sidebar.info(f"Targeting: **{selected_room}**\nURL: `{target_url}`")
-
 # Session State Storage Initialization
 if "records" not in st.session_state:
     st.session_state.records = []
 
-# Action Buttons in Sidebar
+# Sidebar Action Buttons
 start_btn = st.sidebar.button("🚀 Start Monitoring")
 reset_btn = st.sidebar.button("🗑️ Reset Recorded Data")
 
 if reset_btn:
     st.session_state.records = []
-    # Clear CSV log content
     if os.path.exists("aviator_records.csv"):
         open("aviator_records.csv", "w").close()
-    st.sidebar.success("Data reset successfully!")
+    st.sidebar.success("Recorded data cleared!")
 
 col_left, col_right = st.columns([1, 1])
 
@@ -111,38 +104,49 @@ if start_btn:
                     pass
 
             driver = setup_browser()
-            driver.get(target_url)
-            time.sleep(5)  # Allow frame initialization
+            driver.get("https://odibets.com/casino/aviator")
+            time.sleep(6)  # Wait for full page and iframe loading
 
-            # Switch room tab if present in main container
-            if selected_room == "Room 2":
-                try:
-                    room_tabs = driver.find_elements(By.XPATH, "//*[contains(text(), 'Room 2')]")
-                    for tab in room_tabs:
-                        if tab.is_displayed():
-                            tab.click()
-                            time.sleep(2)
-                            break
-                except Exception:
-                    pass
+            # Explicitly select Room Tab on OdiBets interface
+            try:
+                target_label = "Room 1" if selected_room == "Room 1" else "Room 2"
+                tab_elements = driver.find_elements(By.XPATH, f"//*[contains(text(), '{target_label}')]")
+                for tab in tab_elements:
+                    if tab.is_displayed():
+                        driver.execute_script("arguments[0].click();", tab)
+                        time.sleep(4)
+                        break
+            except Exception:
+                pass
 
             status_box.success(f"Connected to {selected_room}! Tracking live data...")
 
-            # Real-time monitoring loop
+            # Long-running polling loop
             while True:
-                # 1. Switch to active iframe
+                # 1. Switch driver context to game iframe
+                driver.switch_to.default_content()
                 iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                if len(iframes) > 0:
+                
+                game_frame = None
+                for frame in iframes:
+                    src = frame.get_attribute("src") or ""
+                    if "spribegaming" in src or "aviator" in src:
+                        game_frame = frame
+                        break
+
+                if game_frame:
+                    driver.switch_to.frame(game_frame)
+                elif len(iframes) > 0:
                     driver.switch_to.frame(iframes[0])
 
-                # 2. Direct DOM extraction (No heavy BeautifulSoup overhead)
-                payout_elements = driver.find_elements(
-                    By.XPATH, 
-                    "//*[contains(@class, 'payout') or contains(@class, 'bubble')]"
+                # 2. Target exact Aviator live payout bubbles inside Spribe container
+                elements = driver.find_elements(
+                    By.CSS_SELECTOR, 
+                    ".payouts-block .bubble-multiplier, .payout-tag, .payouts-wrapper div"
                 )
 
                 current_batch = []
-                for el in payout_elements:
+                for el in elements:
                     try:
                         text = el.text.strip()
                         if "x" in text.lower():
@@ -154,7 +158,7 @@ if start_btn:
 
                 driver.switch_to.default_content()
 
-                # 3. Store new chronological entries
+                # 3. Append new distinct records chronologically
                 for val in reversed(current_batch):
                     if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -167,12 +171,12 @@ if start_btn:
                         
                         st.session_state.records.insert(0, entry)
 
-                        # Write to CSV log file
+                        # Save to persistent CSV log
                         with open("aviator_records.csv", "a", newline="") as f:
                             writer = csv.writer(f)
                             writer.writerow([ts, selected_room, val])
 
-                # 4. Render Table and Metric Header
+                # 4. Render output table & latest metric
                 if st.session_state.records:
                     latest_val = st.session_state.records[0]["Raw_Val"]
                     
@@ -193,9 +197,9 @@ if start_btn:
                     
                     table_box.dataframe(styled_df, use_container_width=True)
 
-                # Pause to keep CPU low and avoid Streamlit cloud throttling
+                # Keep loop sleep strictly above 0.5s to prevent CPU throttling notifications
                 time.sleep(scan_interval)
 
         except Exception as e:
-            status_box.warning(f"Re-establishing connection... ({str(e)[:40]})")
+            status_box.warning(f"Re-synchronizing room stream... ({str(e)[:40]})")
             time.sleep(2)
