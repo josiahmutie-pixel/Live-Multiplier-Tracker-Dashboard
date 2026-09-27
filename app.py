@@ -23,35 +23,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS for Color Badges
-st.markdown("""
-<style>
-.badge-blue {
-    background-color: #3498db;
-    color: white;
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-weight: bold;
-}
-.badge-purple {
-    background-color: #9b59b6;
-    color: white;
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-weight: bold;
-}
-.badge-pink {
-    background-color: #e91e63;
-    color: white;
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-weight: bold;
-}
-</style>
-""", unsafe_allow_html=True)
-
 st.title("✈️ OdiBets Aviator Live Tracker")
-st.caption("Auto-reconnecting live DOM tracker with color-coded multiplier categories.")
 
 # Sidebar Configuration
 st.sidebar.header("Room & Scan Settings")
@@ -64,7 +36,6 @@ selected_room = st.sidebar.radio(
 
 scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.5, 3.0, 1.0)
 
-# Build Target URL dynamically based on room selection
 if selected_room == "Room 1":
     target_url = "https://odibets.com/casino/aviator?room=aviator"
 else:
@@ -89,18 +60,18 @@ with col_right:
 
 start_btn = st.sidebar.button("🚀 Start Monitoring")
 
-def get_category_and_color(val):
-    if val < 2.0:
-        return "Blue (< 2.0x)", "#3498db"
-    elif 2.0 <= val < 10.0:
-        return "Purple (2x - 10x)", "#9b59b6"
-    else:
-        return "Pink (>= 10x)", "#e91e63"
-
-def highlight_rows(row):
-    val = row["Raw_Val"]
-    _, color = get_category_and_color(val)
-    return [f'background-color: {color}; color: white; font-weight: bold;' if col in ["Multiplier", "Category"] else '' for col in row.index]
+def color_multiplier_text(val):
+    """Applies color to the numerical text only."""
+    try:
+        num = float(val)
+        if num < 2.0:
+            return 'color: #3498db; font-weight: bold;'  # Blue
+        elif 2.0 <= num < 10.0:
+            return 'color: #9b59b6; font-weight: bold;'  # Purple
+        else:
+            return 'color: #e91e63; font-weight: bold;'  # Pink
+    except ValueError:
+        return ''
 
 def setup_browser():
     options = webdriver.ChromeOptions()
@@ -126,7 +97,7 @@ if start_btn:
 
     while retry_count < max_retries:
         try:
-            status_box.info(f"Launching browser for {selected_room} (Attempt {retry_count + 1})...")
+            status_box.info(f"Connecting to {selected_room}...")
             
             if driver:
                 try:
@@ -135,7 +106,6 @@ if start_btn:
                     pass
 
             driver = setup_browser()
-            status_box.info(f"Connecting to {target_url}...")
             driver.get(target_url)
             time.sleep(7)  # Wait for iframe load
 
@@ -148,11 +118,8 @@ if start_btn:
                 pass
 
             status_box.success(f"Connected to {selected_room}! Live tracking active...")
-            
-            # Reset retry count on successful connection
             retry_count = 0
 
-            # Main Parsing Loop
             while True:
                 # 1. Switch to Aviator game iframe if present
                 iframes = driver.find_elements(By.TAG_NAME, "iframe")
@@ -168,7 +135,7 @@ if start_btn:
 
                 driver.switch_to.default_content()
 
-                # 4. Extract numerical values
+                # 4. Extract numerical values (cleaned without 'x')
                 current_batch = []
                 for el in payout_elements:
                     text = el.get_text().strip()
@@ -180,40 +147,43 @@ if start_btn:
                         except ValueError:
                             continue
 
-                # 5. Reverse batch to maintain chronological order
+                # 5. Add new records chronologically
                 for val in reversed(current_batch):
                     if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        category, _ = get_category_and_color(val)
                         
                         entry = {
                             "Timestamp": ts,
-                            "Multiplier": f"{val}x",
-                            "Category": category,
-                            "Room": selected_room,
+                            "Multiplier": f"{val:.2f}",
                             "Raw_Val": val
                         }
                         
                         st.session_state.records.insert(0, entry)
 
-                        # Write log entry to CSV
-                        with open("aviator_grouped_records.csv", "a", newline="") as f:
+                        # Write to CSV log file
+                        with open("aviator_records.csv", "a", newline="") as f:
                             writer = csv.writer(f)
-                            writer.writerow([ts, selected_room, val, category])
+                            writer.writerow([ts, selected_room, val])
 
                 # 6. Render Updates
                 if st.session_state.records:
-                    latest = st.session_state.records[0]
-                    val_num = latest["Raw_Val"]
-                    badge_cls = "badge-blue" if val_num < 2.0 else ("badge-purple" if val_num < 10.0 else "badge-pink")
+                    latest_val = st.session_state.records[0]["Raw_Val"]
                     
+                    if latest_val < 2.0:
+                        badge_color = "#3498db"
+                    elif 2.0 <= latest_val < 10.0:
+                        badge_color = "#9b59b6"
+                    else:
+                        badge_color = "#e91e63"
+
                     metric_box.markdown(
-                        f"### Latest Value: <span class='{badge_cls}'>{latest['Multiplier']} ({latest['Category']})</span>",
+                        f"### Latest Value: <span style='color: {badge_color}; font-weight: bold;'>{latest_val:.2f}</span>",
                         unsafe_allow_html=True
                     )
                     
-                    df = pd.DataFrame(st.session_state.records)[["Timestamp", "Room", "Multiplier", "Category", "Raw_Val"]]
-                    styled_df = df.style.apply(highlight_rows, axis=1).drop(columns=["Raw_Val"])
+                    # Clean table generation
+                    df = pd.DataFrame(st.session_state.records)[["Timestamp", "Multiplier"]]
+                    styled_df = df.style.map(color_multiplier_text, subset=["Multiplier"])
                     
                     table_box.dataframe(styled_df, use_container_width=True)
 
@@ -221,10 +191,10 @@ if start_btn:
 
         except Exception as e:
             retry_count += 1
-            status_box.warning(f"Connection glitch encountered: {str(e)}. Reconnecting ({retry_count}/{max_retries})...")
-            time.sleep(4)
+            status_box.warning(f"Reconnecting ({retry_count}/{max_retries})...")
+            time.sleep(3)
 
     if retry_count >= max_retries:
-        status_box.error("Max reconnect attempts reached. Please click 'Start Monitoring' to restart.")
+        status_box.error("Max reconnect attempts reached. Click 'Start Monitoring' to restart.")
         if driver:
             driver.quit()
