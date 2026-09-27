@@ -1,11 +1,10 @@
 import os
-import gc
 import time
 import csv
-import glob
 import pandas as pd
 import streamlit as st
 from datetime import datetime
+from bs4 import BeautifulSoup
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -26,20 +25,6 @@ st.set_page_config(
 
 st.title("✈️ OdiBets Aviator Live Tracker")
 
-# Disk cleanup function for leftover temp files
-def cleanup_temp_files():
-    try:
-        temp_files = glob.glob("/tmp/*.png") + glob.glob("*.png")
-        for f in temp_files:
-            try:
-                os.remove(f)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-cleanup_temp_files()
-
 # Sidebar Configuration
 st.sidebar.header("Room & Scan Settings")
 
@@ -49,72 +34,44 @@ selected_room = st.sidebar.radio(
     index=0
 )
 
-scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.3, 2.0, 0.5)
+scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.5, 3.0, 1.0)
 
-# Initialize Session State
+if selected_room == "Room 1":
+    target_url = "https://odibets.com/casino/aviator?room=aviator"
+else:
+    target_url = "https://odibets.com/casino/aviator?room=aviator2"
+
+st.sidebar.info(f"Targeting: **{selected_room}**\nURL: `{target_url}`")
+
+# Session State Storage
 if "records" not in st.session_state:
     st.session_state.records = []
-    # Load past CSV data on fresh session launch if available
-    if os.path.exists("aviator_records.csv"):
-        try:
-            records_df = pd.read_csv("aviator_records.csv", names=["Timestamp", "Room", "Raw_Val"])
-            records_df = records_df[records_df["Room"] == selected_room].tail(50)
-            for _, row in records_df.iloc[::-1].iterrows():
-                st.session_state.records.append({
-                    "Timestamp": row["Timestamp"],
-                    "Multiplier": f"{float(row['Raw_Val']):.2f}x",
-                    "Raw_Val": float(row["Raw_Val"])
-                })
-        except Exception:
-            pass
-
-# Sidebar Action Buttons
-start_btn = st.sidebar.button("🚀 Start Monitoring")
-reset_btn = st.sidebar.button("🗑️ Reset Recorded Data")
-
-if reset_btn:
-    st.session_state.records = []
-    if os.path.exists("aviator_records.csv"):
-        open("aviator_records.csv", "w").close()
-    cleanup_temp_files()
-    st.sidebar.success("Recorded data cleared!")
 
 col_left, col_right = st.columns([1, 1])
 
 with col_left:
     st.subheader("Connection Status")
     status_box = st.empty()
-    status_box.info("Ready. Click 'Start Monitoring' to connect.")
 
 with col_right:
     st.subheader(f"Live Multipliers ({selected_room})")
     metric_box = st.empty()
     table_box = st.empty()
 
-# Render existing data immediately so table is never blank
-def render_dashboard():
-    if st.session_state.records:
-        latest_val = st.session_state.records[0]["Raw_Val"]
-        
-        if latest_val < 2.0:
-            badge_color = "#3498db"
-        elif 2.0 <= latest_val < 10.0:
-            badge_color = "#9b59b6"
+start_btn = st.sidebar.button("🚀 Start Monitoring")
+
+def color_multiplier_text(val):
+    """Applies color to the numerical text only."""
+    try:
+        num = float(val)
+        if num < 2.0:
+            return 'color: #3498db; font-weight: bold;'  # Blue
+        elif 2.0 <= num < 10.0:
+            return 'color: #9b59b6; font-weight: bold;'  # Purple
         else:
-            badge_color = "#e91e63"
-
-        metric_box.markdown(
-            f"### Latest Value: <span style='color: {badge_color}; font-weight: bold;'>{latest_val:.2f}x</span>",
-            unsafe_allow_html=True
-        )
-
-        df = pd.DataFrame(st.session_state.records)[["Timestamp", "Multiplier"]]
-        table_box.dataframe(df, use_container_width=True, height=400)
-    else:
-        metric_box.markdown("### Latest Value: `--`")
-        table_box.info("No multipliers recorded yet.")
-
-render_dashboard()
+            return 'color: #e91e63; font-weight: bold;'  # Pink
+    except ValueError:
+        return ''
 
 def setup_browser():
     options = webdriver.ChromeOptions()
@@ -122,11 +79,7 @@ def setup_browser():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-infobars")
-    options.add_argument("--disk-cache-size=1")
-    options.add_argument("--media-cache-size=1")
-    options.add_argument("--window-size=1280,720")
+    options.add_argument("--window-size=1920,1080")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     chrome_path = "/usr/bin/chromium"
@@ -136,9 +89,13 @@ def setup_browser():
     return webdriver.Chrome(options=options)
 
 if start_btn:
+    st.session_state.records = []
     driver = None
+    
+    max_retries = 5
+    retry_count = 0
 
-    while True:
+    while retry_count < max_retries:
         try:
             status_box.info(f"Connecting to {selected_room}...")
             
@@ -148,80 +105,96 @@ if start_btn:
                 except Exception:
                     pass
 
-            cleanup_temp_files()
-            gc.collect()
-
             driver = setup_browser()
-            driver.get("https://odibets.com/casino/aviator")
-            time.sleep(5)
+            driver.get(target_url)
+            time.sleep(7)  # Wait for iframe load
 
-            # Switch Room tab on main site wrapper
+            # Explicitly click room tab if present in main DOM
             try:
-                target_label = "Room 1" if selected_room == "Room 1" else "Room 2"
-                tab_elements = driver.find_elements(By.XPATH, f"//*[contains(text(), '{target_label}')]")
-                for tab in tab_elements:
-                    if tab.is_displayed():
-                        driver.execute_script("arguments[0].click();", tab)
-                        time.sleep(3)
-                        break
+                room_btn = driver.find_element(By.XPATH, f"//*[contains(text(), '{selected_room}')]")
+                room_btn.click()
+                time.sleep(2)
             except Exception:
                 pass
 
-            # Switch into game frame
-            iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            if len(iframes) > 0:
-                driver.switch_to.frame(iframes[0])
+            status_box.success(f"Connected to {selected_room}! Live tracking active...")
+            retry_count = 0
 
-            status_box.success(f"Connected to {selected_room}! Tracking active...")
-
-            loop_counter = 0
             while True:
-                loop_counter += 1
-                try:
-                    # Extract latest multiplier bubble (index 0)
-                    latest_bubble = driver.find_elements(
-                        By.CSS_SELECTOR, 
-                        ".payouts-block .bubble-multiplier, .payout-tag, .payouts-wrapper div"
-                    )
+                # 1. Switch to Aviator game iframe if present
+                iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                if len(iframes) > 0:
+                    driver.switch_to.frame(iframes[0])
 
-                    if latest_bubble:
-                        text = latest_bubble[0].text.strip()
-                        if "x" in text.lower():
-                            clean = text.lower().replace("x", "").replace(" ", "").strip()
+                # 2. Extract DOM Page Source
+                html_source = driver.page_source
+                soup = BeautifulSoup(html_source, "html.parser")
+
+                # 3. Find history bubble elements
+                payout_elements = soup.find_all(class_=lambda c: c and ("payout" in c.lower() or "bubble" in c.lower()))
+
+                driver.switch_to.default_content()
+
+                # 4. Extract numerical values (cleaned without 'x')
+                current_batch = []
+                for el in payout_elements:
+                    text = el.get_text().strip()
+                    if "x" in text.lower():
+                        clean = text.lower().replace("x", "").replace(" ", "").strip()
+                        try:
                             val = float(clean)
+                            current_batch.append(val)
+                        except ValueError:
+                            continue
 
-                            # Record only distinct new incoming values
-                            if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
-                                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                
-                                entry = {
-                                    "Timestamp": ts,
-                                    "Multiplier": f"{val:.2f}x",
-                                    "Raw_Val": val
-                                }
-                                
-                                st.session_state.records.insert(0, entry)
+                # 5. Add new records chronologically
+                for val in reversed(current_batch):
+                    if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        entry = {
+                            "Timestamp": ts,
+                            "Multiplier": f"{val:.2f}",
+                            "Raw_Val": val
+                        }
+                        
+                        st.session_state.records.insert(0, entry)
 
-                                if len(st.session_state.records) > 50:
-                                    st.session_state.records = st.session_state.records[:50]
+                        # Write to CSV log file
+                        with open("aviator_records.csv", "a", newline="") as f:
+                            writer = csv.writer(f)
+                            writer.writerow([ts, selected_room, val])
 
-                                with open("aviator_records.csv", "a", newline="") as f:
-                                    writer = csv.writer(f)
-                                    writer.writerow([ts, selected_room, val])
+                # 6. Render Updates
+                if st.session_state.records:
+                    latest_val = st.session_state.records[0]["Raw_Val"]
+                    
+                    if latest_val < 2.0:
+                        badge_color = "#3498db"
+                    elif 2.0 <= latest_val < 10.0:
+                        badge_color = "#9b59b6"
+                    else:
+                        badge_color = "#e91e63"
 
-                                # Immediately re-render UI components on new arrival
-                                render_dashboard()
-
-                except Exception:
-                    pass
-
-                # Clear CPU/RAM cache periodically
-                if loop_counter % 20 == 0:
-                    gc.collect()
-                    cleanup_temp_files()
+                    metric_box.markdown(
+                        f"### Latest Value: <span style='color: {badge_color}; font-weight: bold;'>{latest_val:.2f}</span>",
+                        unsafe_allow_html=True
+                    )
+                    
+                    # Clean table generation
+                    df = pd.DataFrame(st.session_state.records)[["Timestamp", "Multiplier"]]
+                    styled_df = df.style.map(color_multiplier_text, subset=["Multiplier"])
+                    
+                    table_box.dataframe(styled_df, use_container_width=True)
 
                 time.sleep(scan_interval)
 
         except Exception as e:
-            status_box.warning(f"Re-synchronizing room stream... ({str(e)[:40]})")
-            time.sleep(2)
+            retry_count += 1
+            status_box.warning(f"Reconnecting ({retry_count}/{max_retries})...")
+            time.sleep(3)
+
+    if retry_count >= max_retries:
+        status_box.error("Max reconnect attempts reached. Click 'Start Monitoring' to restart.")
+        if driver:
+            driver.quit()
