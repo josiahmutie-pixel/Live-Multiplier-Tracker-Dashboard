@@ -8,6 +8,8 @@ from bs4 import BeautifulSoup
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from pyvirtualdisplay import Display
 
 # Start headless virtual display for Streamlit Cloud
@@ -34,8 +36,9 @@ selected_room = st.sidebar.radio(
     index=0
 )
 
-scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.5, 3.0, 1.0)
+scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.3, 2.0, 0.5)
 
+# Target URLs
 if selected_room == "Room 1":
     target_url = "https://odibets.com/casino/aviator?room=aviator"
 else:
@@ -61,7 +64,7 @@ with col_right:
 start_btn = st.sidebar.button("🚀 Start Monitoring")
 
 def color_multiplier_text(val):
-    """Applies color to the numerical text only."""
+    """Applies color to numerical text directly."""
     try:
         num = float(val)
         if num < 2.0:
@@ -91,13 +94,13 @@ def setup_browser():
 if start_btn:
     st.session_state.records = []
     driver = None
-    
-    max_retries = 5
-    retry_count = 0
+    attempt = 0
 
-    while retry_count < max_retries:
+    # Continuous long-running loop
+    while True:
         try:
-            status_box.info(f"Connecting to {selected_room}...")
+            attempt += 1
+            status_box.info(f"Connecting to {selected_room} (Session #{attempt})...")
             
             if driver:
                 try:
@@ -107,21 +110,26 @@ if start_btn:
 
             driver = setup_browser()
             driver.get(target_url)
-            time.sleep(7)  # Wait for iframe load
+            time.sleep(5)  # Initial DOM load
 
-            # Explicitly click room tab if present in main DOM
-            try:
-                room_btn = driver.find_element(By.XPATH, f"//*[contains(text(), '{selected_room}')]")
-                room_btn.click()
-                time.sleep(2)
-            except Exception:
-                pass
+            # Target precise room inside iframe structure
+            if selected_room == "Room 2":
+                try:
+                    # Switch & click Room 2 tab directly on the page container
+                    room2_tabs = driver.find_elements(By.XPATH, "//*[contains(text(), 'Room 2')]")
+                    for tab in room2_tabs:
+                        if tab.is_displayed():
+                            tab.click()
+                            time.sleep(2)
+                            break
+                except Exception:
+                    pass
 
-            status_box.success(f"Connected to {selected_room}! Live tracking active...")
-            retry_count = 0
+            status_box.success(f"Active Live Tracker: {selected_room}")
 
+            # Sub-loop for real-time high-speed DOM polling
             while True:
-                # 1. Switch to Aviator game iframe if present
+                # 1. Access active game iframe
                 iframes = driver.find_elements(By.TAG_NAME, "iframe")
                 if len(iframes) > 0:
                     driver.switch_to.frame(iframes[0])
@@ -130,7 +138,7 @@ if start_btn:
                 html_source = driver.page_source
                 soup = BeautifulSoup(html_source, "html.parser")
 
-                # 3. Find history bubble elements
+                # 3. Target payout history bubbles
                 payout_elements = soup.find_all(class_=lambda c: c and ("payout" in c.lower() or "bubble" in c.lower()))
 
                 driver.switch_to.default_content()
@@ -147,7 +155,7 @@ if start_btn:
                         except ValueError:
                             continue
 
-                # 5. Add new records chronologically
+                # 5. Insert new records chronologically
                 for val in reversed(current_batch):
                     if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -160,12 +168,12 @@ if start_btn:
                         
                         st.session_state.records.insert(0, entry)
 
-                        # Write to CSV log file
+                        # Save to CSV
                         with open("aviator_records.csv", "a", newline="") as f:
                             writer = csv.writer(f)
                             writer.writerow([ts, selected_room, val])
 
-                # 6. Render Updates
+                # 6. Render Dashboard Table & Badge
                 if st.session_state.records:
                     latest_val = st.session_state.records[0]["Raw_Val"]
                     
@@ -181,7 +189,6 @@ if start_btn:
                         unsafe_allow_html=True
                     )
                     
-                    # Clean table generation
                     df = pd.DataFrame(st.session_state.records)[["Timestamp", "Multiplier"]]
                     styled_df = df.style.map(color_multiplier_text, subset=["Multiplier"])
                     
@@ -190,11 +197,5 @@ if start_btn:
                 time.sleep(scan_interval)
 
         except Exception as e:
-            retry_count += 1
-            status_box.warning(f"Reconnecting ({retry_count}/{max_retries})...")
-            time.sleep(3)
-
-    if retry_count >= max_retries:
-        status_box.error("Max reconnect attempts reached. Click 'Start Monitoring' to restart.")
-        if driver:
-            driver.quit()
+            status_box.warning(f"Re-synchronizing session... ({str(e)[:50]})")
+            time.sleep(2)
