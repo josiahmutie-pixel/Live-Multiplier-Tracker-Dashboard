@@ -19,7 +19,7 @@ st.set_page_config(
 
 st.title("✈️ OdiBets Aviator Live Tracker")
 
-# Clean leftover temp screenshots and cache files from disk
+# Clean leftover temp screenshot files to save CPU & disk
 def cleanup_temp_files():
     try:
         temp_files = glob.glob("/tmp/*.png") + glob.glob("*.png")
@@ -44,7 +44,7 @@ selected_room = st.sidebar.radio(
 
 scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.5, 3.0, 1.0)
 
-# Initialize Session State Records
+# Initialize Session State
 if "records" not in st.session_state:
     st.session_state.records = []
     if os.path.exists("aviator_records.csv"):
@@ -83,7 +83,7 @@ with col_right:
     metric_box = st.empty()
     table_box = st.empty()
 
-# Render UI components cleanly
+# Render live table and top indicator
 def render_dashboard():
     if st.session_state.records:
         latest_val = st.session_state.records[0]["Raw_Val"]
@@ -120,15 +120,21 @@ def setup_browser():
     options.add_argument("--media-cache-size=1")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-    # Path fallbacks for Streamlit Cloud linux container
-    if os.path.exists("/usr/bin/chromium"):
-        options.binary_location = "/usr/bin/chromium"
-    elif os.path.exists("/usr/bin/chromium-browser"):
-        options.binary_location = "/usr/bin/chromium-browser"
+    # Locate Chromium binary paths
+    for binary in ["/usr/bin/chromium", "/usr/bin/chromium-browser"]:
+        if os.path.exists(binary):
+            options.binary_location = binary
+            break
 
-    driver_path = "/usr/bin/chromedriver"
-    if os.path.exists(driver_path):
-        service = Service(driver_path)
+    # Locate Chromedriver paths
+    driver_bin = None
+    for driver_path in ["/usr/bin/chromedriver", "/usr/lib/chromium-browser/chromedriver"]:
+        if os.path.exists(driver_path):
+            driver_bin = driver_path
+            break
+
+    if driver_bin:
+        service = Service(driver_bin)
         return webdriver.Chrome(service=service, options=options)
     
     return webdriver.Chrome(options=options)
@@ -165,7 +171,7 @@ if start_btn:
             except Exception:
                 pass
 
-            # Switch to game frame context
+            # Switch to game iframe
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             if len(iframes) > 0:
                 driver.switch_to.frame(iframes[0])
@@ -198,11 +204,9 @@ if start_btn:
                                 
                                 st.session_state.records.insert(0, entry)
 
-                                # Cap in-memory history to last 50 items
                                 if len(st.session_state.records) > 50:
                                     st.session_state.records = st.session_state.records[:50]
 
-                                # Save persistent data to disk
                                 with open("aviator_records.csv", "a", newline="") as f:
                                     writer = csv.writer(f)
                                     writer.writerow([ts, selected_room, val])
