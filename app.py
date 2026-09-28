@@ -28,7 +28,7 @@ st.title("✈️ OdiBets Aviator Live Tracker")
 
 def cleanup_temp_files():
     try:
-        temp_files = glob.glob("/tmp/*.png") + glob.glob("*.png")
+        temp_files = glob.glob("/tmp/*.png") + glob.glob("*.png") + glob.glob("/tmp/core*")
         for f in temp_files:
             try:
                 os.remove(f)
@@ -48,7 +48,7 @@ selected_room = st.sidebar.radio(
     index=0
 )
 
-scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.5, 3.0, 1.0)
+scan_interval = st.sidebar.slider("Check Interval (seconds)", 1.0, 5.0, 2.0)
 
 # Session state setup
 if "records" not in st.session_state:
@@ -81,6 +81,7 @@ col_left, col_right = st.columns([1, 1])
 with col_left:
     st.subheader("Connection Status")
     status_box = st.empty()
+    debug_box = st.empty()
     status_box.info("Ready. Click 'Start Monitoring' to connect.")
 
 with col_right:
@@ -105,7 +106,8 @@ def render_dashboard():
         )
 
         df = pd.DataFrame(st.session_state.records)[["Timestamp", "Multiplier"]]
-        table_box.dataframe(df, use_container_width=True, height=400)
+        # Fixed deprecation warning to avoid UI state memory leaks
+        table_box.dataframe(df, height=450)
     else:
         metric_box.markdown("### Latest Value: `--`")
         table_box.info("No multipliers recorded yet.")
@@ -119,7 +121,15 @@ def setup_browser():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
-    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--window-size=1280,720")
+    
+    # Ultra Memory Saver Flags for Streamlit Cloud (1GB RAM Cap)
+    options.add_argument("--blink-settings=imagesEnabled=false")
+    options.add_argument("--disable-site-isolation-trials")
+    options.add_argument("--js-flags=--max-old-space-size=128")
+    options.add_argument("--disk-cache-size=1")
+    options.add_argument("--media-cache-size=1")
+    options.add_argument("--disable-component-update")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     # Locate Chromium
@@ -145,36 +155,42 @@ def setup_browser():
 
     return webdriver.Chrome(options=options)
 
-# Helper function to find game iframe recursively
-def switch_to_game_iframe(driver):
-    driver.switch_to.default_content()
-    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-    
-    for index, iframe in enumerate(iframes):
-        try:
-            driver.switch_to.default_content()
-            driver.switch_to.frame(iframe)
-            # Check if nested iframe exists inside this iframe
-            inner_iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            if inner_iframes:
-                driver.switch_to.frame(inner_iframes[0])
-            
-            # Check if payout tags are present in this context
-            test_elements = driver.find_elements(
-                By.CSS_SELECTOR, 
-                ".payouts-block, .payout-tag, .bubble-multiplier, app-stats-widget, .payouts-wrapper"
-            )
-            if test_elements:
-                return True
-        except Exception:
-            continue
-            
-    # Fallback to first iframe if matching elements aren't immediately found
-    driver.switch_to.default_content()
-    if iframes:
-        driver.switch_to.frame(iframes[0])
-        return True
-    return False
+def extract_multipliers_javascript(driver):
+    """Deep JS DOM traversal across frames."""
+    script = """
+    function getMultipliers() {
+        let results = [];
+        function scanDoc(doc) {
+            if (!doc) return;
+            let selectors = ['.bubble-multiplier', '.payout-tag', '.payout-item', 'app-stats-item', '.payouts-block div'];
+            selectors.forEach(sel => {
+                let els = doc.querySelectorAll(sel);
+                els.forEach(el => {
+                    let txt = el.innerText || el.textContent || '';
+                    if (txt.toLowerCase().includes('x') && txt.length <= 8) {
+                        results.push(txt.trim());
+                    }
+                });
+            });
+
+            let iframes = doc.querySelectorAll('iframe');
+            iframes.forEach(iframe => {
+                try {
+                    if (iframe.contentDocument) {
+                        scanDoc(iframe.contentDocument);
+                    }
+                } catch(e) {}
+            });
+        }
+        scanDoc(document);
+        return results;
+    }
+    return getMultipliers();
+    """
+    try:
+        return driver.execute_script(script)
+    except Exception:
+        return []
 
 if start_btn:
     driver = None
@@ -208,62 +224,88 @@ if start_btn:
             except Exception:
                 pass
 
-            # Switch to active game iframe
-            switch_to_game_iframe(driver)
-
             status_box.success(f"Connected to {selected_room}! Tracking active...")
 
             loop_counter = 0
             while True:
                 loop_counter += 1
-                try:
-                    # Broad selector list covering Spribe Aviator DOM revisions
-                    elements = driver.find_elements(
-                        By.CSS_SELECTOR, 
-                        ".payouts-block .bubble-multiplier, .payout-tag, .payouts-wrapper div, app-stats-widget div, .payout-item"
-                    )
+                
+                # Execute JS extraction
+                raw_extracted = extract_multipliers_javascript(driver)
+                
+                # Fallback to standard frame traversal if JS recursive scan was blocked
+                if not raw_extracted:
+                    try:
+                        driver.switch_to.default_content()
+                        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                        for iframe in iframes:
+                            try:
+                                driver.switch_to.default_content()
+                                driver.switch_to.frame(iframe)
+                                inner_iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                                if inner_iframes:
+                                    driver.switch_to.frame(inner_iframes[0])
+                                
+                                elements = driver.find_elements(
+                                    By.CSS_SELECTOR, 
+                                    "app-stats-item, .bubble-multiplier, .payout-tag, .payout-item"
+                                )
+                                for el in elements:
+                                    txt = el.text.strip()
+                                    if "x" in txt.lower() and len(txt) <= 8:
+                                        raw_extracted.append(txt)
+                                if raw_extracted:
+                                    break
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
 
-                    found_text = None
-                    for el in elements:
-                        txt = el.text.strip()
-                        if "x" in txt.lower() and len(txt) <= 8:
-                            found_text = txt
-                            break
-
-                    if found_text:
-                        clean = found_text.lower().replace("x", "").replace(" ", "").strip()
+                current_history = []
+                for txt in raw_extracted:
+                    clean = txt.lower().replace("x", "").replace(" ", "").strip()
+                    try:
                         val = float(clean)
+                        current_history.append(val)
+                    except ValueError:
+                        pass
 
+                debug_box.caption(f"Last scan found {len(current_history)} raw multipliers in DOM at {datetime.now().strftime('%H:%M:%S')}")
+
+                if current_history:
+                    updated = False
+                    for val in reversed(current_history[:20]):
                         if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
                             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            
                             entry = {
                                 "Timestamp": ts,
                                 "Multiplier": f"{val:.2f}x",
                                 "Raw_Val": val
                             }
-                            
                             st.session_state.records.insert(0, entry)
-
-                            if len(st.session_state.records) > 50:
-                                st.session_state.records = st.session_state.records[:50]
+                            updated = True
 
                             with open("aviator_records.csv", "a", newline="") as f:
                                 writer = csv.writer(f)
                                 writer.writerow([ts, selected_room, val])
 
-                            render_dashboard()
+                    if updated:
+                        if len(st.session_state.records) > 50:
+                            st.session_state.records = st.session_state.records[:50]
+                        render_dashboard()
 
-                except Exception:
-                    # Re-verify iframe focus if element context was lost
-                    switch_to_game_iframe(driver)
-
-                if loop_counter % 20 == 0:
+                # Clean garbage and temporary files every 10 iterations
+                if loop_counter % 10 == 0:
                     gc.collect()
                     cleanup_temp_files()
+
+                # Restart browser every 100 scans to completely wipe accumulated Chrome RAM leaks
+                if loop_counter >= 100:
+                    status_box.info("Performing scheduled memory flush & re-sync...")
+                    break
 
                 time.sleep(scan_interval)
 
         except Exception as e:
-            status_box.warning(f"Re-synchronizing room stream... ({str(e)[:40]})")
+            status_box.warning(f"Re-synchronizing room stream... ({str(e)[:50]})")
             time.sleep(3)
