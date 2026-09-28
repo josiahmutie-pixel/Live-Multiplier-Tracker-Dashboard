@@ -1,8 +1,5 @@
 tesseract-ocr
 tesseract-ocr-eng
 libgl1
-xvfb
 chromium
-chromium-chromedriver
-chromium
-chromedriver
+chromium-driver
