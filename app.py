@@ -48,7 +48,7 @@ selected_room = st.sidebar.radio(
     index=0
 )
 
-scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.2, 2.0, 0.5)
+scan_interval = st.sidebar.slider("Check Interval (seconds)", 1.0, 5.0, 2.0)
 
 # Session state setup
 if "records" not in st.session_state:
@@ -81,6 +81,7 @@ col_left, col_right = st.columns([1, 1])
 with col_left:
     st.subheader("Connection Status")
     status_box = st.empty()
+    debug_box = st.empty()
     status_box.info("Ready. Click 'Start Monitoring' to connect.")
 
 with col_right:
@@ -147,35 +148,47 @@ def setup_browser():
 
     return webdriver.Chrome(options=options)
 
-def switch_to_game_iframe(driver):
-    driver.switch_to.default_content()
-    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-    
-    for iframe in iframes:
-        try:
-            driver.switch_to.default_content()
-            driver.switch_to.frame(iframe)
+def extract_multipliers_javascript(driver):
+    """Deep JS DOM traversal across all frames without relying on driver frame switching."""
+    script = """
+    function getMultipliers() {
+        let results = [];
+        
+        function scanDoc(doc) {
+            if (!doc) return;
             
-            # Check nested frame if present
-            inner_iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            if inner_iframes:
-                driver.switch_to.frame(inner_iframes[0])
-            
-            # Check for payout elements
-            test_elements = driver.find_elements(
-                By.CSS_SELECTOR, 
-                ".payouts-block, .payout-tag, .bubble-multiplier, app-stats-widget, app-stats-item, .payout-item"
-            )
-            if test_elements:
-                return True
-        except Exception:
-            continue
-            
-    driver.switch_to.default_content()
-    if iframes:
-        driver.switch_to.frame(iframes[0])
-        return True
-    return False
+            // Query elements
+            let selectors = ['.bubble-multiplier', '.payout-tag', '.payout-item', 'app-stats-item', '.payouts-block div'];
+            selectors.forEach(sel => {
+                let els = doc.querySelectorAll(sel);
+                els.forEach(el => {
+                    let txt = el.innerText || el.textContent || '';
+                    if (txt.toLowerCase().includes('x') && txt.length <= 8) {
+                        results.push(txt.trim());
+                    }
+                });
+            });
+
+            // Recurse into iframes
+            let iframes = doc.querySelectorAll('iframe');
+            iframes.forEach(iframe => {
+                try {
+                    if (iframe.contentDocument) {
+                        scanDoc(iframe.contentDocument);
+                    }
+                } catch(e) {}
+            });
+        }
+
+        scanDoc(document);
+        return results;
+    }
+    return getMultipliers();
+    """
+    try:
+        return driver.execute_script(script)
+    except Exception:
+        return []
 
 if start_btn:
     driver = None
@@ -195,7 +208,7 @@ if start_btn:
 
             driver = setup_browser()
             driver.get("https://odibets.com/casino/aviator")
-            time.sleep(6)
+            time.sleep(8)
 
             # Click selected room tab if present
             try:
@@ -204,73 +217,86 @@ if start_btn:
                 for tab in tab_elements:
                     if tab.is_displayed():
                         driver.execute_script("arguments[0].click();", tab)
-                        time.sleep(3)
+                        time.sleep(4)
                         break
             except Exception:
                 pass
 
-            # Switch to active game iframe
-            switch_to_game_iframe(driver)
             status_box.success(f"Connected to {selected_room}! Tracking active...")
 
             loop_counter = 0
             while True:
                 loop_counter += 1
-                try:
-                    # Target all multiplier elements in the history strip
-                    elements = driver.find_elements(
-                        By.CSS_SELECTOR, 
-                        "app-stats-item div, .payouts-block .bubble-multiplier, .payout-tag, .payout-item, .payouts-wrapper div"
-                    )
+                
+                # Execute JS extraction
+                raw_extracted = extract_multipliers_javascript(driver)
+                
+                # Fallback to standard frame traversal if JS recursive scan was blocked by cross-origin security
+                if not raw_extracted:
+                    driver.switch_to.default_content()
+                    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                    for iframe in iframes:
+                        try:
+                            driver.switch_to.default_content()
+                            driver.switch_to.frame(iframe)
+                            inner_iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                            if inner_iframes:
+                                driver.switch_to.frame(inner_iframes[0])
+                            
+                            elements = driver.find_elements(
+                                By.CSS_SELECTOR, 
+                                "app-stats-item, .bubble-multiplier, .payout-tag, .payout-item"
+                            )
+                            for el in elements:
+                                txt = el.text.strip()
+                                if "x" in txt.lower() and len(txt) <= 8:
+                                    raw_extracted.append(txt)
+                            if raw_extracted:
+                                break
+                        except Exception:
+                            continue
 
-                    current_history = []
-                    for el in elements:
-                        txt = el.text.strip()
-                        if "x" in txt.lower() and len(txt) <= 8:
-                            clean = txt.lower().replace("x", "").replace(" ", "").strip()
-                            try:
-                                val = float(clean)
-                                current_history.append(val)
-                            except ValueError:
-                                pass
+                current_history = []
+                for txt in raw_extracted:
+                    clean = txt.lower().replace("x", "").replace(" ", "").strip()
+                    try:
+                        val = float(clean)
+                        current_history.append(val)
+                    except ValueError:
+                        pass
 
-                    # If elements found, sync with recorded state from oldest to newest
-                    if current_history:
-                        updated = False
-                        
-                        # Inspect the latest top values in reverse order (oldest -> newest)
-                        for val in reversed(current_history[:15]):
-                            # Skip if this value is already recorded as the most recent
-                            if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
-                                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                entry = {
-                                    "Timestamp": ts,
-                                    "Multiplier": f"{val:.2f}x",
-                                    "Raw_Val": val
-                                }
-                                st.session_state.records.insert(0, entry)
-                                updated = True
+                # Update status debug box
+                debug_box.caption(f"Last scan found {len(current_history)} values in DOM at {datetime.now().strftime('%H:%M:%S')}")
 
-                                # Save immediately to CSV
-                                with open("aviator_records.csv", "a", newline="") as f:
-                                    writer = csv.writer(f)
-                                    writer.writerow([ts, selected_room, val])
+                if current_history:
+                    updated = False
+                    # Process top history (oldest to newest)
+                    for val in reversed(current_history[:20]):
+                        if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
+                            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            entry = {
+                                "Timestamp": ts,
+                                "Multiplier": f"{val:.2f}x",
+                                "Raw_Val": val
+                            }
+                            st.session_state.records.insert(0, entry)
+                            updated = True
 
-                        if updated:
-                            if len(st.session_state.records) > 50:
-                                st.session_state.records = st.session_state.records[:50]
-                            render_dashboard()
+                            with open("aviator_records.csv", "a", newline="") as f:
+                                writer = csv.writer(f)
+                                writer.writerow([ts, selected_room, val])
 
-                except Exception:
-                    # Re-verify iframe focus if connection dropped
-                    switch_to_game_iframe(driver)
+                    if updated:
+                        if len(st.session_state.records) > 50:
+                            st.session_state.records = st.session_state.records[:50]
+                        render_dashboard()
 
-                if loop_counter % 30 == 0:
+                if loop_counter % 20 == 0:
                     gc.collect()
                     cleanup_temp_files()
 
                 time.sleep(scan_interval)
 
         except Exception as e:
-            status_box.warning(f"Re-synchronizing room stream... ({str(e)[:40]})")
-            time.sleep(2)
+            status_box.warning(f"Re-synchronizing room stream... ({str(e)[:50]})")
+            time.sleep(3)
