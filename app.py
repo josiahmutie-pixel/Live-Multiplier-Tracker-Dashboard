@@ -11,6 +11,13 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 
+# Fallback manager import
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+    from webdriver_manager.core.os_manager import ChromeType
+except ImportError:
+    ChromeDriverManager = None
+
 st.set_page_config(
     page_title="Aviator Live Multiplier Dashboard",
     page_icon="✈️",
@@ -19,7 +26,6 @@ st.set_page_config(
 
 st.title("✈️ OdiBets Aviator Live Tracker")
 
-# Clean leftover temp screenshot files to save CPU & disk
 def cleanup_temp_files():
     try:
         temp_files = glob.glob("/tmp/*.png") + glob.glob("*.png")
@@ -44,7 +50,7 @@ selected_room = st.sidebar.radio(
 
 scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.5, 3.0, 1.0)
 
-# Initialize Session State
+# Session state setup
 if "records" not in st.session_state:
     st.session_state.records = []
     if os.path.exists("aviator_records.csv"):
@@ -60,7 +66,6 @@ if "records" not in st.session_state:
         except Exception:
             pass
 
-# Sidebar Buttons
 start_btn = st.sidebar.button("🚀 Start Monitoring")
 reset_btn = st.sidebar.button("🗑️ Reset Recorded Data")
 
@@ -83,7 +88,6 @@ with col_right:
     metric_box = st.empty()
     table_box = st.empty()
 
-# Render live table and top indicator
 def render_dashboard():
     if st.session_state.records:
         latest_val = st.session_state.records[0]["Raw_Val"]
@@ -115,29 +119,62 @@ def setup_browser():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
-    options.add_argument("--window-size=1280,720")
-    options.add_argument("--disk-cache-size=1")
-    options.add_argument("--media-cache-size=1")
+    options.add_argument("--window-size=1920,1080")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-    # Locate Chromium binary paths
+    # Locate Chromium
     for binary in ["/usr/bin/chromium", "/usr/bin/chromium-browser"]:
         if os.path.exists(binary):
             options.binary_location = binary
             break
 
-    # Locate Chromedriver paths
-    driver_bin = None
+    # Try APT system driver path
     for driver_path in ["/usr/bin/chromedriver", "/usr/lib/chromium-browser/chromedriver"]:
         if os.path.exists(driver_path):
-            driver_bin = driver_path
-            break
+            return webdriver.Chrome(service=Service(driver_path), options=options)
 
-    if driver_bin:
-        service = Service(driver_bin)
-        return webdriver.Chrome(service=service, options=options)
-    
+    # Try Webdriver Manager fallback
+    if ChromeDriverManager:
+        try:
+            return webdriver.Chrome(
+                service=Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()),
+                options=options
+            )
+        except Exception:
+            pass
+
     return webdriver.Chrome(options=options)
+
+# Helper function to find game iframe recursively
+def switch_to_game_iframe(driver):
+    driver.switch_to.default_content()
+    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+    
+    for index, iframe in enumerate(iframes):
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(iframe)
+            # Check if nested iframe exists inside this iframe
+            inner_iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            if inner_iframes:
+                driver.switch_to.frame(inner_iframes[0])
+            
+            # Check if payout tags are present in this context
+            test_elements = driver.find_elements(
+                By.CSS_SELECTOR, 
+                ".payouts-block, .payout-tag, .bubble-multiplier, app-stats-widget, .payouts-wrapper"
+            )
+            if test_elements:
+                return True
+        except Exception:
+            continue
+            
+    # Fallback to first iframe if matching elements aren't immediately found
+    driver.switch_to.default_content()
+    if iframes:
+        driver.switch_to.frame(iframes[0])
+        return True
+    return False
 
 if start_btn:
     driver = None
@@ -157,24 +194,22 @@ if start_btn:
 
             driver = setup_browser()
             driver.get("https://odibets.com/casino/aviator")
-            time.sleep(5)
+            time.sleep(8)
 
-            # Switch Room Tab
+            # Click selected room tab if present
             try:
                 target_label = "Room 1" if selected_room == "Room 1" else "Room 2"
                 tab_elements = driver.find_elements(By.XPATH, f"//*[contains(text(), '{target_label}')]")
                 for tab in tab_elements:
                     if tab.is_displayed():
                         driver.execute_script("arguments[0].click();", tab)
-                        time.sleep(3)
+                        time.sleep(4)
                         break
             except Exception:
                 pass
 
-            # Switch to game iframe
-            iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            if len(iframes) > 0:
-                driver.switch_to.frame(iframes[0])
+            # Switch to active game iframe
+            switch_to_game_iframe(driver)
 
             status_box.success(f"Connected to {selected_room}! Tracking active...")
 
@@ -182,39 +217,46 @@ if start_btn:
             while True:
                 loop_counter += 1
                 try:
+                    # Broad selector list covering Spribe Aviator DOM revisions
                     elements = driver.find_elements(
                         By.CSS_SELECTOR, 
-                        ".payouts-block .bubble-multiplier, .payout-tag, .payouts-wrapper div"
+                        ".payouts-block .bubble-multiplier, .payout-tag, .payouts-wrapper div, app-stats-widget div, .payout-item"
                     )
 
-                    if elements:
-                        text = elements[0].text.strip()
-                        if "x" in text.lower():
-                            clean = text.lower().replace("x", "").replace(" ", "").strip()
-                            val = float(clean)
+                    found_text = None
+                    for el in elements:
+                        txt = el.text.strip()
+                        if "x" in txt.lower() and len(txt) <= 8:
+                            found_text = txt
+                            break
 
-                            if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
-                                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                
-                                entry = {
-                                    "Timestamp": ts,
-                                    "Multiplier": f"{val:.2f}x",
-                                    "Raw_Val": val
-                                }
-                                
-                                st.session_state.records.insert(0, entry)
+                    if found_text:
+                        clean = found_text.lower().replace("x", "").replace(" ", "").strip()
+                        val = float(clean)
 
-                                if len(st.session_state.records) > 50:
-                                    st.session_state.records = st.session_state.records[:50]
+                        if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
+                            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            
+                            entry = {
+                                "Timestamp": ts,
+                                "Multiplier": f"{val:.2f}x",
+                                "Raw_Val": val
+                            }
+                            
+                            st.session_state.records.insert(0, entry)
 
-                                with open("aviator_records.csv", "a", newline="") as f:
-                                    writer = csv.writer(f)
-                                    writer.writerow([ts, selected_room, val])
+                            if len(st.session_state.records) > 50:
+                                st.session_state.records = st.session_state.records[:50]
 
-                                render_dashboard()
+                            with open("aviator_records.csv", "a", newline="") as f:
+                                writer = csv.writer(f)
+                                writer.writerow([ts, selected_room, val])
+
+                            render_dashboard()
 
                 except Exception:
-                    pass
+                    # Re-verify iframe focus if element context was lost
+                    switch_to_game_iframe(driver)
 
                 if loop_counter % 20 == 0:
                     gc.collect()
