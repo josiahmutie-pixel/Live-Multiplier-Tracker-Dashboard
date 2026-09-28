@@ -6,7 +6,6 @@ import glob
 import pandas as pd
 import streamlit as st
 from datetime import datetime
-from bs4 import BeautifulSoup
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -40,7 +39,7 @@ def cleanup_temp_files():
 
 cleanup_temp_files()
 
-# Sidebar Settings
+# Sidebar Configuration
 st.sidebar.header("Room & Scan Settings")
 
 selected_room = st.sidebar.radio(
@@ -49,9 +48,9 @@ selected_room = st.sidebar.radio(
     index=0
 )
 
-scan_interval = st.sidebar.slider("Check Interval (seconds)", 1.0, 5.0, 2.0)
+scan_interval = st.sidebar.slider("Check Interval (seconds)", 0.2, 2.0, 0.5)
 
-# Initialize Session State
+# Session state setup
 if "records" not in st.session_state:
     st.session_state.records = []
     if os.path.exists("aviator_records.csv"):
@@ -106,7 +105,7 @@ def render_dashboard():
         )
 
         df = pd.DataFrame(st.session_state.records)[["Timestamp", "Multiplier"]]
-        table_box.dataframe(df, use_container_width=True, height=400)
+        table_box.dataframe(df, use_container_width=True, height=450)
     else:
         metric_box.markdown("### Latest Value: `--`")
         table_box.info("No multipliers recorded yet.")
@@ -121,18 +120,22 @@ def setup_browser():
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
     options.add_argument("--window-size=1280,720")
-    options.add_argument("--blink-settings=imagesEnabled=false") # Disable images to save CPU
+    options.add_argument("--blink-settings=imagesEnabled=false")
+    options.add_argument("--disable-site-isolation-trials")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
+    # Locate Chromium
     for binary in ["/usr/bin/chromium", "/usr/bin/chromium-browser"]:
         if os.path.exists(binary):
             options.binary_location = binary
             break
 
+    # Try APT system driver path
     for driver_path in ["/usr/bin/chromedriver", "/usr/lib/chromium-browser/chromedriver"]:
         if os.path.exists(driver_path):
             return webdriver.Chrome(service=Service(driver_path), options=options)
 
+    # Try Webdriver Manager fallback
     if ChromeDriverManager:
         try:
             return webdriver.Chrome(
@@ -152,12 +155,18 @@ def switch_to_game_iframe(driver):
         try:
             driver.switch_to.default_content()
             driver.switch_to.frame(iframe)
+            
+            # Check nested frame if present
             inner_iframes = driver.find_elements(By.TAG_NAME, "iframe")
             if inner_iframes:
                 driver.switch_to.frame(inner_iframes[0])
             
-            # Verify frame context
-            if "payout" in driver.page_source.lower() or "bubble-multiplier" in driver.page_source.lower():
+            # Check for payout elements
+            test_elements = driver.find_elements(
+                By.CSS_SELECTOR, 
+                ".payouts-block, .payout-tag, .bubble-multiplier, app-stats-widget, app-stats-item, .payout-item"
+            )
+            if test_elements:
                 return True
         except Exception:
             continue
@@ -170,84 +179,98 @@ def switch_to_game_iframe(driver):
 
 if start_btn:
     driver = None
-    try:
-        status_box.info(f"Connecting to {selected_room}...")
-        driver = setup_browser()
-        driver.get("https://odibets.com/casino/aviator")
-        time.sleep(8)
 
-        # Room selection
+    while True:
         try:
-            target_label = "Room 1" if selected_room == "Room 1" else "Room 2"
-            tab_elements = driver.find_elements(By.XPATH, f"//*[contains(text(), '{target_label}')]")
-            for tab in tab_elements:
-                if tab.is_displayed():
-                    driver.execute_script("arguments[0].click();", tab)
-                    time.sleep(3)
-                    break
-        except Exception:
-            pass
+            status_box.info(f"Connecting to {selected_room}...")
+            
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
-        switch_to_game_iframe(driver)
-        status_box.success(f"Connected to {selected_room}! Tracking active...")
+            cleanup_temp_files()
+            gc.collect()
 
-        loop_counter = 0
-        while True:
-            loop_counter += 1
+            driver = setup_browser()
+            driver.get("https://odibets.com/casino/aviator")
+            time.sleep(6)
+
+            # Click selected room tab if present
             try:
-                # Fast HTML extraction to eliminate CPU throttle
-                html = driver.page_source
-                soup = BeautifulSoup(html, "html.parser")
-
-                # Match all multiplier tags in the top history bar
-                elements = soup.select(".payouts-block .bubble-multiplier, .payout-tag, .payouts-wrapper div, app-stats-widget div, .payout-item")
-
-                extracted_vals = []
-                for el in elements:
-                    txt = el.get_text(strip=True)
-                    if "x" in txt.lower() and len(txt) <= 8:
-                        clean = txt.lower().replace("x", "").replace(" ", "").strip()
-                        try:
-                            val = float(clean)
-                            extracted_vals.append(val)
-                        except ValueError:
-                            pass
-
-                # If values were found, sync history sequence (reverse to order oldest -> newest)
-                if extracted_vals:
-                    new_found = False
-                    for val in reversed(extracted_vals):
-                        # Ensure no duplicate consecutive entries
-                        if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
-                            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            entry = {
-                                "Timestamp": ts,
-                                "Multiplier": f"{val:.2f}x",
-                                "Raw_Val": val
-                            }
-                            st.session_state.records.insert(0, entry)
-                            new_found = True
-
-                            # Save to CSV log
-                            with open("aviator_records.csv", "a", newline="") as f:
-                                writer = csv.writer(f)
-                                writer.writerow([ts, selected_room, val])
-
-                    if new_found:
-                        if len(st.session_state.records) > 50:
-                            st.session_state.records = st.session_state.records[:50]
-                        render_dashboard()
-
+                target_label = "Room 1" if selected_room == "Room 1" else "Room 2"
+                tab_elements = driver.find_elements(By.XPATH, f"//*[contains(text(), '{target_label}')]")
+                for tab in tab_elements:
+                    if tab.is_displayed():
+                        driver.execute_script("arguments[0].click();", tab)
+                        time.sleep(3)
+                        break
             except Exception:
-                switch_to_game_iframe(driver)
+                pass
 
-            if loop_counter % 25 == 0:
-                gc.collect()
-                cleanup_temp_files()
+            # Switch to active game iframe
+            switch_to_game_iframe(driver)
+            status_box.success(f"Connected to {selected_room}! Tracking active...")
 
-            time.sleep(scan_interval)
+            loop_counter = 0
+            while True:
+                loop_counter += 1
+                try:
+                    # Target all multiplier elements in the history strip
+                    elements = driver.find_elements(
+                        By.CSS_SELECTOR, 
+                        "app-stats-item div, .payouts-block .bubble-multiplier, .payout-tag, .payout-item, .payouts-wrapper div"
+                    )
 
-    except Exception as e:
-        status_box.error(f"Error encountered: {str(e)[:60]}")
-        if driver:
-            driver.quit()
+                    current_history = []
+                    for el in elements:
+                        txt = el.text.strip()
+                        if "x" in txt.lower() and len(txt) <= 8:
+                            clean = txt.lower().replace("x", "").replace(" ", "").strip()
+                            try:
+                                val = float(clean)
+                                current_history.append(val)
+                            except ValueError:
+                                pass
+
+                    # If elements found, sync with recorded state from oldest to newest
+                    if current_history:
+                        updated = False
+                        
+                        # Inspect the latest top values in reverse order (oldest -> newest)
+                        for val in reversed(current_history[:15]):
+                            # Skip if this value is already recorded as the most recent
+                            if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
+                                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                entry = {
+                                    "Timestamp": ts,
+                                    "Multiplier": f"{val:.2f}x",
+                                    "Raw_Val": val
+                                }
+                                st.session_state.records.insert(0, entry)
+                                updated = True
+
+                                # Save immediately to CSV
+                                with open("aviator_records.csv", "a", newline="") as f:
+                                    writer = csv.writer(f)
+                                    writer.writerow([ts, selected_room, val])
+
+                        if updated:
+                            if len(st.session_state.records) > 50:
+                                st.session_state.records = st.session_state.records[:50]
+                            render_dashboard()
+
+                except Exception:
+                    # Re-verify iframe focus if connection dropped
+                    switch_to_game_iframe(driver)
+
+                if loop_counter % 30 == 0:
+                    gc.collect()
+                    cleanup_temp_files()
+
+                time.sleep(scan_interval)
+
+        except Exception as e:
+            status_box.warning(f"Re-synchronizing room stream... ({str(e)[:40]})")
+            time.sleep(2)
