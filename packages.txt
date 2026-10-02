@@ -1,5 +1,3 @@
-tesseract-ocr
-tesseract-ocr-eng
-libgl1
 chromium
 chromium-driver
+xvfb
