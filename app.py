@@ -49,6 +49,8 @@ st.sidebar.info(f"Targeting: **{selected_room}**\nURL: `{target_url}`")
 # Session State Storage
 if "records" not in st.session_state:
     st.session_state.records = []
+if "last_batch" not in st.session_state:
+    st.session_state.last_batch = []
 
 col_left, col_right = st.columns([1, 1])
 
@@ -93,6 +95,7 @@ def setup_browser():
 
 if start_btn:
     st.session_state.records = []
+    st.session_state.last_batch = []
     driver = None
     attempt = 0
 
@@ -115,7 +118,6 @@ if start_btn:
             # Target precise room inside iframe structure
             if selected_room == "Room 2":
                 try:
-                    # Switch & click Room 2 tab directly on the page container
                     room2_tabs = driver.find_elements(By.XPATH, "//*[contains(text(), 'Room 2')]")
                     for tab in room2_tabs:
                         if tab.is_displayed():
@@ -155,23 +157,44 @@ if start_btn:
                         except ValueError:
                             continue
 
-                # 5. Insert new records chronologically
-                for val in reversed(current_batch):
-                    if not st.session_state.records or st.session_state.records[0]["Raw_Val"] != val:
+                # 5. Process newly landed multiplier rounds only
+                if current_batch:
+                    # Case A: Initial run load
+                    if not st.session_state.last_batch:
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        
-                        entry = {
-                            "Timestamp": ts,
-                            "Multiplier": f"{val:.2f}",
-                            "Raw_Val": val
-                        }
-                        
-                        st.session_state.records.insert(0, entry)
+                        for val in reversed(current_batch):
+                            entry = {
+                                "Timestamp": ts,
+                                "Multiplier": f"{val:.2f}",
+                                "Raw_Val": val
+                            }
+                            st.session_state.records.insert(0, entry)
+                        st.session_state.last_batch = current_batch
 
-                        # Save to CSV
-                        with open("aviator_records.csv", "a", newline="") as f:
-                            writer = csv.writer(f)
-                            writer.writerow([ts, selected_room, val])
+                    # Case B: Subsequent checks — isolate only newly added top elements
+                    elif current_batch != st.session_state.last_batch:
+                        new_items = []
+                        for val in current_batch:
+                            if val == st.session_state.last_batch[0]:
+                                break
+                            new_items.append(val)
+
+                        if new_items:
+                            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            for val in reversed(new_items):
+                                entry = {
+                                    "Timestamp": ts,
+                                    "Multiplier": f"{val:.2f}",
+                                    "Raw_Val": val
+                                }
+                                st.session_state.records.insert(0, entry)
+
+                                # Save single unique entry to CSV
+                                with open("aviator_records.csv", "a", newline="") as f:
+                                    writer = csv.writer(f)
+                                    writer.writerow([ts, selected_room, val])
+
+                        st.session_state.last_batch = current_batch
 
                 # 6. Render Dashboard Table & Badge
                 if st.session_state.records:
@@ -185,7 +208,7 @@ if start_btn:
                         badge_color = "#e91e63"
 
                     metric_box.markdown(
-                        f"### Latest Value: <span style='color: {badge_color}; font-weight: bold;'>{latest_val:.2f}</span>",
+                        f"### Latest Value: <span style='color: {badge_color}; font-weight: bold;'>{latest_val:.2f}x</span>",
                         unsafe_allow_html=True
                     )
                     
