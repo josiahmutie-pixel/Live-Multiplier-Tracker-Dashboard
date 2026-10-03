@@ -3,7 +3,7 @@ import time
 import csv
 import pandas as pd
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 
 from selenium import webdriver
@@ -11,6 +11,9 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from pyvirtualdisplay import Display
+
+# Define East Africa Time Zone (UTC+3 for Kenya)
+EAT = timezone(timedelta(hours=3))
 
 # Start headless virtual display for Streamlit Cloud
 try:
@@ -46,7 +49,7 @@ else:
 
 st.sidebar.info(f"Targeting: **{selected_room}**\nURL: `{target_url}`")
 
-# Session State Storage
+# Persistent Session State Storage
 if "records" not in st.session_state:
     st.session_state.records = []
 if "last_batch" not in st.session_state:
@@ -67,12 +70,11 @@ with col_right:
 start_btn = st.sidebar.button("🚀 Start Monitoring")
 reset_btn = st.sidebar.button("🧹 Reset System Data")
 
-# Handle Reset Action
+# Handle Manual Reset Action
 if reset_btn:
     st.session_state.records = []
     st.session_state.last_batch = []
     
-    # Optional: Clear the local CSV log file
     if os.path.exists("aviator_records.csv"):
         os.remove("aviator_records.csv")
         
@@ -108,12 +110,12 @@ def setup_browser():
     return webdriver.Chrome(options=options)
 
 if start_btn:
-    st.session_state.records = []
+    # DO NOT clear st.session_state.records here so data is never lost on restart
     st.session_state.last_batch = []
     driver = None
     attempt = 0
 
-    # Continuous long-running loop
+    # Continuous long-running loop with auto-reconnect
     while True:
         try:
             attempt += 1
@@ -127,25 +129,24 @@ if start_btn:
 
             driver = setup_browser()
             driver.get(target_url)
-            time.sleep(5)  # Initial DOM load
+            time.sleep(5)  # Allow DOM to render
 
-            # Target precise room inside iframe structure
-            if selected_room == "Room 2":
-                try:
-                    room2_tabs = driver.find_elements(By.XPATH, "//*[contains(text(), 'Room 2')]")
-                    for tab in room2_tabs:
-                        if tab.is_displayed():
-                            tab.click()
-                            time.sleep(2)
-                            break
-                except Exception:
-                    pass
+            # Force exact room click regardless of reconnects
+            try:
+                room_tabs = driver.find_elements(By.XPATH, f"//*[contains(text(), '{selected_room}')]")
+                for tab in room_tabs:
+                    if tab.is_displayed():
+                        tab.click()
+                        time.sleep(2)
+                        break
+            except Exception:
+                pass
 
             status_box.success(f"Active Live Tracker: {selected_room}")
 
-            # Sub-loop for real-time high-speed DOM polling
+            # Sub-loop for real-time DOM polling
             while True:
-                # 1. Access active game iframe
+                # 1. Switch to active iframe
                 iframes = driver.find_elements(By.TAG_NAME, "iframe")
                 if len(iframes) > 0:
                     driver.switch_to.frame(iframes[0])
@@ -154,12 +155,12 @@ if start_btn:
                 html_source = driver.page_source
                 soup = BeautifulSoup(html_source, "html.parser")
 
-                # 3. Target payout history bubbles
+                # 3. Find payout bubbles
                 payout_elements = soup.find_all(class_=lambda c: c and ("payout" in c.lower() or "bubble" in c.lower()))
 
                 driver.switch_to.default_content()
 
-                # 4. Extract numerical values (cleaned without 'x')
+                # 4. Clean numerical multipliers
                 current_batch = []
                 for el in payout_elements:
                     text = el.get_text().strip()
@@ -171,21 +172,28 @@ if start_btn:
                         except ValueError:
                             continue
 
-                # 5. Process newly landed multiplier rounds only
+                # 5. Process new distinct rounds
                 if current_batch:
-                    # Case A: Initial run load
+                    # Initial batch capture on connection
                     if not st.session_state.last_batch:
-                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        ts = datetime.now(EAT).strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        # Identify existing latest values to avoid duplicates across reconnections
+                        existing_vals = [r["Raw_Val"] for r in st.session_state.records[:len(current_batch)]]
+                        
                         for val in reversed(current_batch):
-                            entry = {
-                                "Timestamp": ts,
-                                "Multiplier": f"{val:.2f}",
-                                "Raw_Val": val
-                            }
-                            st.session_state.records.insert(0, entry)
+                            # Append only if not already at the top of recorded memory
+                            if not st.session_state.records or val != st.session_state.records[0]["Raw_Val"]:
+                                entry = {
+                                    "Timestamp": ts,
+                                    "Multiplier": f"{val:.2f}",
+                                    "Raw_Val": val
+                                }
+                                st.session_state.records.insert(0, entry)
+                        
                         st.session_state.last_batch = current_batch
 
-                    # Case B: Subsequent checks — isolate only newly added top elements
+                    # Subsequent polls — extract only new multipliers at the top
                     elif current_batch != st.session_state.last_batch:
                         new_items = []
                         for val in current_batch:
@@ -194,7 +202,7 @@ if start_btn:
                             new_items.append(val)
 
                         if new_items:
-                            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            ts = datetime.now(EAT).strftime("%Y-%m-%d %H:%M:%S")
                             for val in reversed(new_items):
                                 entry = {
                                     "Timestamp": ts,
@@ -203,14 +211,14 @@ if start_btn:
                                 }
                                 st.session_state.records.insert(0, entry)
 
-                                # Save single unique entry to CSV
+                                # Save unique round to persistent CSV
                                 with open("aviator_records.csv", "a", newline="") as f:
                                     writer = csv.writer(f)
                                     writer.writerow([ts, selected_room, val])
 
                         st.session_state.last_batch = current_batch
 
-                # 6. Render Dashboard Table & Badge
+                # 6. Display Table & Badge
                 if st.session_state.records:
                     latest_val = st.session_state.records[0]["Raw_Val"]
                     
