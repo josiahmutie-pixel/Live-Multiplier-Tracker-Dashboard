@@ -63,7 +63,21 @@ with col_right:
     metric_box = st.empty()
     table_box = st.empty()
 
+# Action Buttons
 start_btn = st.sidebar.button("🚀 Start Monitoring")
+reset_btn = st.sidebar.button("🧹 Reset System Data")
+
+# Handle Reset Action
+if reset_btn:
+    st.session_state.records = []
+    st.session_state.last_batch = []
+    
+    # Optional: Clear the local CSV log file
+    if os.path.exists("aviator_records.csv"):
+        os.remove("aviator_records.csv")
+        
+    st.sidebar.success("Data reset! Starting clean session.")
+    st.rerun()
 
 def color_multiplier_text(val):
     """Applies color to numerical text directly."""
